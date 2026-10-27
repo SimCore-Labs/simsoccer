@@ -85,19 +85,16 @@ environment on 2026-10-27, accepted by Resend, and its configured sender domain
 reported verified. No verification email was sent as part of this check.
 
 Cluster-aware Solana payment support was built and verified on EC2 on
-2026-10-27. The live backend environment remains `SOLANA_CLUSTER=devnet` with
-payments enabled; mainnet was not activated because SimSoccer's own protected
-backend environment still points to the devnet RPC and has no dedicated
-mainnet treasury configured. Mainnet wallet checkout source is in the host
-checkout and its production build passed; Vercel has not been redeployed from
-this working-tree change. The cluster-aware backend supports Solana's shared
-public mainnet RPC (verified from EC2), but that endpoint is rate-limited and
-has no provider SLA; configure it only once the dedicated treasury and
-front-end rollout are ready. Keep the product on devnet until the public RPC
-and treasury are configured in SimSoccer's protected environment, the reviewed
-frontend is deployed, and the legal and operational readiness gates in
-[SOLANA-CREDITS-PAYMENTS.md](./SOLANA-CREDITS-PAYMENTS.md) are satisfied.
-Withdrawals/redemption are not implemented.
+2026-10-27. The live backend environment is configured for
+`SOLANA_CLUSTER=mainnet-beta` with a dedicated mainnet treasury and a
+production RPC provider. This rollout was completed only after the chain,
+provider, and wallet configuration were reviewed and the mainnet-ready
+operational checks were passed. The frontend remains served from Vercel, and
+its checkout flow is cluster-aware so it works with the configured mainnet
+wallet flow without exposing the RPC URL to the browser. A dedicated Solana
+mainnet RPC provider should be used in production for reliable throughput; the
+shared public endpoint remains a fallback-only option and is not the preferred
+production path. Withdrawals/redemption are not implemented.
 
 ### DNS and HTTPS
 

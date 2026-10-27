@@ -550,7 +550,7 @@ export default function CreditPurchasePage() {
           <div className={styles.checkout}>
             {config.cluster === "mainnet-beta" ? (
               <p className={styles.notice} role="note">
-                Mainnet payments use real SOL. SIM Credits are virtual game credits and are not currently withdrawable or redeemable for cash.
+                Mainnet payments use real SOL. SIM Credits are virtual in-game credits. Withdrawals and cash redemption are not available.
               </p>
             ) : null}
             <section className={styles.packagePanel} aria-labelledby="package-title">
