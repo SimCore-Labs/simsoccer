@@ -1,15 +1,116 @@
 # SimSoccer Project and Production Handoff
 
-- **Snapshot date:** 2026-10-07
+- **Snapshot date:** 2026-10-26
 - **Repository:** `SimCore-Labs/simsoccer`
-- **Backend release deployed:** `1ff5d0b`
-- **EC2 checkout revision checked:** `1ff5d0b`
+- **Backend release deployed:** `cf04479`
+- **EC2 checkout revision checked:** `cf04479`
 
 This is an operational snapshot of the project and its production environment.
 It supplements [DEPLOYMENT-HANDOFF.md](./DEPLOYMENT-HANDOFF.md), which contains
 the more detailed custom-auth configuration, migration, and rollout procedure.
 Production health can change after this snapshot; check the live endpoints
 before acting.
+
+## Replacement deployment — 2026-10-26
+
+This is the current deployment record. The 2026-10-07 machine and world details
+below are historical; the replacement uses a new, clean application database.
+
+### Host and access
+
+| Property | Current value |
+|---|---|
+| EC2 instance | `i-0a383b514b86bf522` |
+| Region / OS | `eu-north-1` / Ubuntu 24.04 |
+| Instance type | `c7i-flex.large` |
+| Elastic IP | `13.63.182.101` |
+| Root volume | 30 GiB encrypted gp3 |
+| Project checkout | `/home/ubuntu/simsoccer`, revision `cf04479` |
+| SSH key pair | `simsoccer-production-20261026` |
+
+The SSH private key is kept in an ignored local file and must not be copied
+into Git or this document. Inbound SSH is restricted to the deployment
+workstation's `/32`; authorize another fixed operator IP in the EC2 security
+group before connecting from a different network. Do not open SSH to the
+internet.
+
+### Database and initial world
+
+- The previous `muizdev` database was not reset or modified. A completed RDS
+  snapshot named `simsoccer-pre-redeploy-20261026` preserves the pre-deployment
+  state.
+- The new application database is `simsoccer_prod` on the existing RDS
+  instance. It contains 41 public tables and all 15 current migrations.
+- The initial `Season 1` seed created 3 leagues, 3 seasons, 60 teams, and 1,140
+  scheduled fixtures. It also created the `demo@simsoccer.com` admin-role
+  account and its 3,000-credit virtual wallet.
+- No world reset or production integration test was run. The migration and
+  seed safety overrides remain disabled in the backend `.env`; the seed used
+  a one-command explicit confirmation after verifying the target database.
+- The RDS security group still allows public PostgreSQL ingress. Do not narrow
+  it until other consumers of the shared instance have been identified.
+
+### Services and verification
+
+All three services are built and run under PM2, with the process list saved
+and the `pm2-ubuntu` systemd unit enabled and active:
+
+| PM2 process | Port | Responsibility |
+|---|---:|---|
+| `simsoccer-runtime` | 8080 | World API, simulation, coordinator, and workers |
+| `simsoccer-accounts` | 8090 | Accounts and authentication API |
+| `simsoccer-settlement` | 8091 | Settlement API and worker |
+
+Backend, Accounts API, and Settlement API TypeScript builds passed on EC2.
+Focused unit tests passed (6 backend tests, ticket-access checks, 11 Accounts
+API tests, and settlement rules). The database-backed comprehensive backend
+test was intentionally not run against production.
+
+PostgreSQL and Redis readiness passed for each service, and the settlement
+worker acquired leadership and completed a successful scan. Nginx routes
+authentication and account requests to port 8090, settlement requests to 8091,
+world requests and `/ws` to port 8080. Let's Encrypt issued a certificate for
+`simapi.muizdev.xyz` on 2026-10-26; Nginx redirects HTTP to HTTPS. Public
+backend, Accounts API, settlement readiness, world status, and public-only
+JWKS endpoints returned HTTP 200 over HTTPS. Certbot renewal dry-run should be
+completed to verify automated renewal end to end.
+
+The generated Accounts API signing key and authentication peppers are stored
+only in the protected, ignored environment files on the host and local
+workstation. No admin credential has been bootstrapped yet; perform
+`npm run admin:bootstrap` interactively on the host and do not share the PIN
+through chat. Email delivery has not yet been independently tested.
+The replacement Resend API key was uploaded to the protected Accounts API
+environment on 2026-10-27, accepted by Resend, and its configured sender domain
+reported verified. No verification email was sent as part of this check.
+
+Cluster-aware Solana payment support was built and verified on EC2 on
+2026-10-27. The live backend environment remains `SOLANA_CLUSTER=devnet` with
+payments enabled; mainnet was not activated because SimSoccer's own protected
+backend environment still points to the devnet RPC and has no dedicated
+mainnet treasury configured. Mainnet wallet checkout source is in the host
+checkout and its production build passed; Vercel has not been redeployed from
+this working-tree change. The cluster-aware backend supports Solana's shared
+public mainnet RPC (verified from EC2), but that endpoint is rate-limited and
+has no provider SLA; configure it only once the dedicated treasury and
+front-end rollout are ready. Keep the product on devnet until the public RPC
+and treasury are configured in SimSoccer's protected environment, the reviewed
+frontend is deployed, and the legal and operational readiness gates in
+[SOLANA-CREDITS-PAYMENTS.md](./SOLANA-CREDITS-PAYMENTS.md) are satisfied.
+Withdrawals/redemption are not implemented.
+
+### DNS and HTTPS
+
+The frontend remains on Vercel at `https://simsoccer.vercel.app`. The API A
+record is now:
+
+```text
+simapi.muizdev.xyz  A  13.63.182.101
+```
+
+At cutover the hostname briefly resolved to the former address `13.61.146.106`.
+After DNS reached the Elastic IP, Certbot issued the certificate and Nginx
+enabled the HTTPS redirect. The frontend was not redeployed or changed.
 
 ## At a glance
 
@@ -18,19 +119,20 @@ fixtures, match state, results, league tables, betting markets, and settlement
 work. The browser displays this data and provides account and betting screens;
 it does not run or control the simulation.
 
-The project has three main applications:
+The project has four main applications:
 
 | Application | Location | Responsibility |
 |---|---|---|
 | Frontend | `frontend/` | Next.js website: live matches, fixtures, results, tables, betting UI, My bets ticket history and lookup, account/auth screens, and administration UI |
 | World backend | `backend/` | Express API, PostgreSQL/Drizzle data, world coordinator, match simulation and background workers, betting and settlement |
 | Accounts API | `accounts-api/` | Express API for first-party registration, verification, sessions, profile, and account endpoints |
+| Settlement API | `settlement-api/` | Independent settlement API and worker sharing the PostgreSQL database |
 
 The website is normally deployed automatically by Vercel from `main`.
 Backend services are deployed manually to EC2. A frontend commit does not by
 itself update the EC2 checkout, and an EC2 pull does not deploy the website.
 
-## Production machine
+## Previous production machine (snapshot 2026-10-07)
 
 The production backend runs on an AWS EC2 instance:
 
@@ -56,7 +158,7 @@ memory total, with about 208 MiB available. These are point-in-time figures,
 not capacity guarantees. This is a small host; large local builds can compete
 with the always-running world service for memory.
 
-### Connecting from the authorized Windows workstation
+### Historical SSH access
 
 The authorized SSH key is stored locally at `C:\simsoccer\wesheild.pem`.
 The key itself must remain private, excluded from Git, and outside this
@@ -97,12 +199,13 @@ or copied. Use filtered checks that report only whether a variable is set.
 
 ## Services and request routing
 
-Both applications are supervised by PM2:
+The backend applications are supervised by PM2:
 
 | PM2 process | Working directory / entry point | Port | Responsibility |
 |---|---|---:|---|
 | `simsoccer-runtime` | `/home/ubuntu/simsoccer/backend`, `dist/start.js` | `8080` | World API, persistent simulation runtime, coordinator and backend workers, betting API |
 | `simsoccer-accounts` | `/home/ubuntu/simsoccer/accounts-api`, `dist/server.js` | `8090` | Account, verification, session, and custom-auth API |
+| `simsoccer-settlement` | `/home/ubuntu/simsoccer/settlement-api`, `dist/server.js` | `8091` | Settlement API and independent worker |
 
 Nginx terminates the public web/API traffic. Its configuration must route
 `/api/auth/` and `/api/account/` to port `8090`, and the world API routes to

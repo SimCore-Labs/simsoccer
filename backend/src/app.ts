@@ -20,6 +20,7 @@ import { coerceLeagueInput, coerceTeamInput } from './admin/operations';
 import { z } from 'zod';
 import {
   createSolanaPaymentOrder,
+  getSolanaPaymentBlockhash,
   getSolanaPaymentConfig,
   getSolanaPaymentOrder,
   reconcileSolanaPaymentOrder,
@@ -1269,6 +1270,21 @@ export function createApp() {
       return res.json(getSolanaPaymentConfig());
     } catch (error) {
       return sendSolanaPaymentError(res, error, 'Solana payment configuration lookup');
+    }
+  });
+
+  app.get('/api/wallet/solana/blockhash', authenticateJwt, requireLocalAccount, solanaPaymentStatusLimiter, async (_req: AuthenticatedRequest, res: Response) => {
+    try {
+      return res.json({ blockhash: await getSolanaPaymentBlockhash() });
+    } catch (error) {
+      if (error instanceof SolanaPaymentError) {
+        return sendSolanaPaymentError(res, error, 'Solana latest blockhash lookup');
+      }
+      console.error('Solana latest blockhash lookup failed.', error);
+      return res.status(503).json({
+        error: 'SOLANA_RPC_UNAVAILABLE',
+        message: 'A payment transaction could not be prepared. Try again shortly.',
+      });
     }
   });
 

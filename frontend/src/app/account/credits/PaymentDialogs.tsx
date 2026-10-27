@@ -10,6 +10,7 @@ type PaymentDialogOrder = {
   creditAmount: string;
   usdCents: number;
   expectedLamports: string;
+  network: "devnet" | "mainnet-beta";
   status: string;
   statusLabel?: string;
   reviewReason: string | null;
@@ -65,8 +66,9 @@ function formatUsd(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
-function explorerUrl(signature: string): string {
-  return `https://explorer.solana.com/tx/${encodeURIComponent(signature)}?cluster=devnet`;
+function explorerUrl(signature: string, network: PaymentDialogOrder["network"]): string {
+  const base = `https://explorer.solana.com/tx/${encodeURIComponent(signature)}`;
+  return network === "devnet" ? `${base}?cluster=devnet` : base;
 }
 
 export function PaymentReviewDialog({
@@ -142,7 +144,7 @@ export function PaymentReviewDialog({
         <p className={styles.orderStatus}>Payment not completed. Close this quote and try again.</p>
       ) : null}
       {order.transactionSignature ? (
-        <a className={styles.explorerLink} href={explorerUrl(order.transactionSignature)} target="_blank" rel="noreferrer">
+        <a className={styles.explorerLink} href={explorerUrl(order.transactionSignature, order.network)} target="_blank" rel="noreferrer">
           View transaction
         </a>
       ) : null}
@@ -187,7 +189,7 @@ export function PaymentSuccessDialog({
         </div>
       ) : null}
       {order.transactionSignature ? (
-        <a className={styles.explorerLink} href={explorerUrl(order.transactionSignature)} target="_blank" rel="noreferrer">
+        <a className={styles.explorerLink} href={explorerUrl(order.transactionSignature, order.network)} target="_blank" rel="noreferrer">
           View transaction
         </a>
       ) : null}

@@ -20,6 +20,15 @@ import WalletIcon from "./WalletIcon";
 import styles from "./page.module.css";
 
 const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/$/, "");
+type SolanaCluster = "devnet" | "mainnet-beta";
+
+function walletStandardChain(cluster: SolanaCluster): "solana:mainnet" | "solana:devnet" {
+  return cluster === "mainnet-beta" ? "solana:mainnet" : "solana:devnet";
+}
+
+function clusterDisplayName(cluster: SolanaCluster): string {
+  return cluster === "mainnet-beta" ? "Solana Mainnet" : "Solana Devnet";
+}
 
 type PaymentPackage = {
   id: string;
@@ -36,7 +45,7 @@ type PaymentOrder = {
   priceProvider: string;
   priceObservedAt: string;
   expectedLamports: string;
-  network: "devnet";
+  network: SolanaCluster;
   treasuryAddress: string;
   payerAddress: string;
   referenceAddress: string;
@@ -48,7 +57,7 @@ type PaymentOrder = {
 
 type PaymentConfig = {
   enabled: boolean;
-  cluster: "devnet";
+  cluster: SolanaCluster;
   packages: PaymentPackage[];
   customTopUp: {
     minCredits: number;
@@ -102,10 +111,10 @@ declare global {
   }
 }
 
-function supportsDevnetWallet(wallet: Wallet): wallet is StandardSolanaWallet {
+function supportsClusterWallet(wallet: Wallet, cluster: SolanaCluster): wallet is StandardSolanaWallet {
   const connect = wallet.features[StandardConnect];
   const send = wallet.features[SolanaSignAndSendTransaction];
-  return wallet.chains.includes("solana:devnet")
+  return wallet.chains.includes(walletStandardChain(cluster))
     && typeof connect === "object"
     && connect !== null
     && "connect" in connect
@@ -116,7 +125,7 @@ function supportsDevnetWallet(wallet: Wallet): wallet is StandardSolanaWallet {
     && typeof send.signAndSendTransaction === "function";
 }
 
-function standardWalletChoice(wallet: StandardSolanaWallet): WalletChoice {
+function standardWalletChoice(wallet: StandardSolanaWallet, cluster: SolanaCluster): WalletChoice {
   return {
     id: `standard:${wallet.name}`,
     name: wallet.name,
@@ -124,10 +133,10 @@ function standardWalletChoice(wallet: StandardSolanaWallet): WalletChoice {
     connect: async () => {
       const { accounts } = await wallet.features[StandardConnect].connect();
       const account: WalletAccount | undefined = accounts.find((item) => (
-        item.chains.includes("solana:devnet")
+        item.chains.includes(walletStandardChain(cluster))
         && item.features.includes(SolanaSignAndSendTransaction)
       ));
-      if (!account) throw new Error("No devnet account is available in this wallet.");
+      if (!account) throw new Error(`No ${clusterDisplayName(cluster)} account is available in this wallet.`);
       const signAndSend = wallet.features[SolanaSignAndSendTransaction].signAndSendTransaction;
       return {
         id: `standard:${wallet.name}`,
@@ -137,7 +146,7 @@ function standardWalletChoice(wallet: StandardSolanaWallet): WalletChoice {
         signAndSendTransaction: async (transaction) => {
           const [result] = await signAndSend({
             account,
-            chain: "solana:devnet",
+            chain: walletStandardChain(cluster),
             transaction: transaction.serialize({ requireAllSignatures: false, verifySignatures: false }),
             options: { preflightCommitment: "confirmed" },
           });
@@ -174,9 +183,11 @@ function legacyWalletChoice(id: string, name: string, provider: LegacySolanaProv
   };
 }
 
-function detectWalletChoices(): WalletChoice[] {
+function detectWalletChoices(cluster: SolanaCluster): WalletChoice[] {
   const wallets = getWallets();
-  const standardChoices = wallets.get().filter(supportsDevnetWallet).map(standardWalletChoice);
+  const standardChoices = wallets.get()
+    .filter((wallet) => supportsClusterWallet(wallet, cluster))
+    .map((wallet) => standardWalletChoice(wallet, cluster));
   const seenProviders = new Set<LegacySolanaProvider>();
   const legacyCandidates: Array<[string, string, LegacySolanaProvider | undefined]> = [
     ["phantom", "Phantom", window.phantom?.solana],
@@ -202,7 +213,6 @@ function detectWalletChoices(): WalletChoice[] {
 const statusText: Record<string, string> = {
   PENDING: "Waiting for payment",
   SUBMITTED: "Payment sent",
-  CONFIRMING: "Confirming on devnet",
   VERIFIED: "Payment verified",
   CREDITED: "Credits added",
   EXPIRED: "Quote expired",
@@ -257,7 +267,7 @@ export default function CreditPurchasePage() {
 
   useEffect(() => {
     const wallets = getWallets();
-    const updateWallets = () => setWalletChoices(detectWalletChoices());
+    const updateWallets = () => setWalletChoices(config ? detectWalletChoices(config.cluster) : []);
     updateWallets();
     const unregisterAdded = wallets.on("register", updateWallets);
     const unregisterRemoved = wallets.on("unregister", updateWallets);
@@ -265,7 +275,7 @@ export default function CreditPurchasePage() {
       unregisterAdded();
       unregisterRemoved();
     };
-  }, []);
+  }, [config]);
 
   const refreshOrder = useCallback(async (currentOrder: PaymentOrder, token: string) => {
     if (!API_URL || polling.current) return;
@@ -435,11 +445,25 @@ export default function CreditPurchasePage() {
         throw new Error("The connected wallet changed. Create a new quote.");
       }
 
-      const { Connection, PublicKey, SystemProgram, Transaction, clusterApiUrl } = await import("@solana/web3.js");
-      const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
+      const { PublicKey, SystemProgram, Transaction } = await import("@solana/web3.js");
       const lamports = BigInt(order.expectedLamports);
       if (lamports > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("This quote is too large to send safely.");
-      const { blockhash } = await connection.getLatestBlockhash("confirmed");
+      const blockhashResponse = await fetch(`${API_URL}/api/wallet/solana/blockhash`, {
+        headers: { Authorization: "Bearer " + token },
+        cache: "no-store",
+      });
+      const blockhashPayload = await readJson(blockhashResponse);
+      const blockhashData = blockhashPayload.blockhash;
+      if (!blockhashResponse.ok
+        || typeof blockhashData !== "object"
+        || blockhashData === null
+        || !("blockhash" in blockhashData)
+        || typeof blockhashData.blockhash !== "string") {
+        throw new Error(typeof blockhashPayload.message === "string"
+          ? blockhashPayload.message
+          : "A payment transaction could not be prepared. Try again shortly.");
+      }
+      const blockhash = blockhashData.blockhash;
       const transfer = SystemProgram.transfer({
         fromPubkey: new PublicKey(order.payerAddress),
         toPubkey: new PublicKey(order.treasuryAddress),
@@ -524,6 +548,11 @@ export default function CreditPurchasePage() {
 
         {!loading && config?.enabled ? (
           <div className={styles.checkout}>
+            {config.cluster === "mainnet-beta" ? (
+              <p className={styles.notice} role="note">
+                Mainnet payments use real SOL. SIM Credits are virtual game credits and are not currently withdrawable or redeemable for cash.
+              </p>
+            ) : null}
             <section className={styles.packagePanel} aria-labelledby="package-title">
               <div className={styles.panelHeading}>
                 <h2 id="package-title">Choose amount</h2>
@@ -643,7 +672,9 @@ export default function CreditPurchasePage() {
           open={paymentReviewOpen}
           order={order ? {
             ...order,
-            statusLabel: statusText[order.status] ?? "Payment pending",
+            statusLabel: order.status === "CONFIRMING"
+              ? `Confirming on ${clusterDisplayName(order.network)}`
+              : statusText[order.status] ?? "Payment pending",
           } : null}
           wallet={activeWallet}
           busy={busy}

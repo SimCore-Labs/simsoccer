@@ -12,7 +12,7 @@ import {
 } from '../db/schema';
 import { env } from '../config/env';
 import { calculateLamports, getSolUsdQuote } from './price-service';
-import { assertDevnetRpc, getFinalizedTransaction, getReferenceSignatures } from './solana-rpc';
+import { assertSolanaRpc, getFinalizedTransaction, getLatestBlockhash, getReferenceSignatures } from './solana-rpc';
 
 const PAYMENT_PACKAGES = [
   { id: 'credits-1000', credits: 1_000, usdCents: 100 },
@@ -87,16 +87,16 @@ export function resolveSolanaPaymentSelection(
 
 function assertPaymentsConfigured(): string {
   if (!env.SOLANA_PAYMENTS_ENABLED) {
-    throw new SolanaPaymentError('Devnet credit purchases are not available.', 503, 'PAYMENTS_DISABLED');
+    throw new SolanaPaymentError('Credit purchases are not available.', 503, 'PAYMENTS_DISABLED');
   }
   const treasury = env.SOLANA_TREASURY_ADDRESS;
   if (!treasury) {
-    throw new SolanaPaymentError('Devnet credit purchases are not configured.', 503, 'PAYMENTS_NOT_CONFIGURED');
+    throw new SolanaPaymentError('Credit purchases are not configured.', 503, 'PAYMENTS_NOT_CONFIGURED');
   }
   try {
     return new PublicKey(treasury).toBase58();
   } catch {
-    throw new SolanaPaymentError('The configured devnet treasury address is invalid.', 503, 'INVALID_TREASURY');
+    throw new SolanaPaymentError('The configured Solana treasury address is invalid.', 503, 'INVALID_TREASURY');
   }
 }
 
@@ -125,6 +125,11 @@ export function getSolanaPaymentConfig() {
   };
 }
 
+export async function getSolanaPaymentBlockhash(): Promise<{ blockhash: string; lastValidBlockHeight: number }> {
+  assertPaymentsConfigured();
+  return getLatestBlockhash();
+}
+
 export async function createSolanaPaymentOrder(
   userId: string,
   packageId: string,
@@ -151,13 +156,14 @@ export async function createSolanaPaymentOrder(
   if (previousOrder) {
     if (previousOrder.packageId !== selectedPackage.id
       || Number(previousOrder.creditAmount) !== selectedPackage.credits
-      || previousOrder.payerAddress !== payerAddress) {
+      || previousOrder.payerAddress !== payerAddress
+      || previousOrder.network !== env.SOLANA_CLUSTER) {
       throw new SolanaPaymentError('That request key was already used for a different payment order.', 409, 'IDEMPOTENCY_KEY_REUSED');
     }
     return previousOrder;
   }
 
-  const [quote] = await Promise.all([getSolUsdQuote(), assertDevnetRpc()]);
+  const [quote] = await Promise.all([getSolUsdQuote(), assertSolanaRpc()]);
   const expectedLamports = calculateLamports(selectedPackage.usdCents, quote.priceUsd);
   if (BigInt(expectedLamports) > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new SolanaPaymentError('This amount cannot be represented safely in a Solana transaction.', 503, 'PACKAGE_AMOUNT_UNSUPPORTED');
@@ -186,7 +192,8 @@ export async function createSolanaPaymentOrder(
       if (existingOrder) {
         if (existingOrder.packageId !== selectedPackage.id
           || Number(existingOrder.creditAmount) !== selectedPackage.credits
-          || existingOrder.payerAddress !== payerAddress) {
+          || existingOrder.payerAddress !== payerAddress
+          || existingOrder.network !== env.SOLANA_CLUSTER) {
           throw new SolanaPaymentError('That request key was already used for a different payment order.', 409, 'IDEMPOTENCY_KEY_REUSED');
         }
         return existingOrder;
@@ -251,6 +258,9 @@ export async function submitSolanaPaymentSignature(
       .for('update')
       .limit(1);
     if (!order) throw new SolanaPaymentError('Payment order not found.', 404, 'ORDER_NOT_FOUND');
+    if (order.network !== env.SOLANA_CLUSTER) {
+      throw new SolanaPaymentError('This payment order belongs to a different Solana network.', 409, 'ORDER_NETWORK_MISMATCH');
+    }
     if (order.status === 'CREDITED') return order;
 
     const [signatureAttempt] = await tx.select({ orderId: solanaPaymentAttempts.orderId })
@@ -497,6 +507,7 @@ export async function reconcileSolanaPaymentOrder(orderId: string, submittedSign
     .where(eq(solanaPaymentOrders.id, orderId))
     .limit(1);
   if (!order) throw new SolanaPaymentError('Payment order not found.', 404, 'ORDER_NOT_FOUND');
+  if (order.network !== env.SOLANA_CLUSTER) return order;
   if (order.status === 'CREDITED') return order;
 
   let signatures: string[];
@@ -554,6 +565,7 @@ export async function reconcileRecentSolanaPayments(): Promise<void> {
     .where(and(
       statuses,
       createdRecently,
+      eq(solanaPaymentOrders.network, env.SOLANA_CLUSTER),
       afterId ? gt(solanaPaymentOrders.id, afterId) : undefined,
     ))
     .orderBy(asc(solanaPaymentOrders.id))

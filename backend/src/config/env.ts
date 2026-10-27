@@ -22,8 +22,8 @@ const envSchema = z.object({
   ALLOW_UNSAFE_SEEDS: z.string().optional().default('false').transform((val) => val === 'true'),
 
   SOLANA_PAYMENTS_ENABLED: z.enum(['true', 'false']).default('false').transform((val) => val === 'true'),
-  SOLANA_CLUSTER: z.enum(['devnet']).default('devnet'),
-  SOLANA_RPC_URL: z.string().url().default('https://api.devnet.solana.com'),
+  SOLANA_CLUSTER: z.enum(['devnet', 'mainnet-beta']).default('devnet'),
+  SOLANA_RPC_URL: z.string().url().optional(),
   SOLANA_TREASURY_ADDRESS: z.string().optional(),
   SOLANA_PAYMENT_ORDER_TTL_SECONDS: z.coerce.number().int().min(60).max(1800).default(600),
 
@@ -46,10 +46,30 @@ if (!_env.success) {
   throw new Error('Invalid environment variables');
 }
 
-export const env = _env.data;
+if (_env.data.SOLANA_CLUSTER === 'mainnet-beta' && !_env.data.SOLANA_RPC_URL) {
+  throw new Error('SOLANA_RPC_URL must be configured for mainnet-beta.');
+}
+
+export const env = {
+  ..._env.data,
+  SOLANA_RPC_URL: _env.data.SOLANA_RPC_URL
+    ?? (_env.data.SOLANA_CLUSTER === 'mainnet-beta'
+      ? 'https://api.mainnet-beta.solana.com'
+      : 'https://api.devnet.solana.com'),
+};
 
 if (env.SOLANA_PAYMENTS_ENABLED && !env.SOLANA_TREASURY_ADDRESS) {
-  throw new Error('SOLANA_TREASURY_ADDRESS is required when Solana devnet payments are enabled.');
+  throw new Error('SOLANA_TREASURY_ADDRESS is required when Solana payments are enabled.');
+}
+
+if (env.NODE_ENV === 'production' && env.SOLANA_PAYMENTS_ENABLED && env.SOLANA_CLUSTER === 'mainnet-beta') {
+  if (new URL(env.SOLANA_RPC_URL).protocol !== 'https:') {
+    throw new Error('Production mainnet payments require an HTTPS Solana RPC provider.');
+  }
+  const rpcHostname = new URL(env.SOLANA_RPC_URL).hostname.toLowerCase();
+  if (rpcHostname === 'api.mainnet-beta.solana.com' || rpcHostname === 'api.mainnet.solana.com') {
+    console.warn('Production mainnet payments are using Solana’s shared public RPC; expect strict rate limits and no provider SLA.');
+  }
 }
 
 if (env.NODE_ENV === 'production' && (!env.AUTH_ISSUER || !env.AUTH_JWKS_URL)) {

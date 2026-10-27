@@ -4,6 +4,7 @@ import {
   inspectPaymentTransaction,
   resolveSolanaPaymentSelection,
 } from '../payments/solana-payment-service';
+import { expectedGenesisHash } from '../payments/solana-rpc';
 
 const payerAddress = '11111111111111111111111111111111';
 const treasuryAddress = 'Vote111111111111111111111111111111111111111';
@@ -32,6 +33,8 @@ const validTransaction = {
   meta: { err: null },
 };
 
+assert.equal(expectedGenesisHash('devnet'), 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG');
+assert.equal(expectedGenesisHash('mainnet-beta'), '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d');
 assert.equal(calculateLamports(100, '200'), '5000000');
 assert.equal(calculateLamports(500, '200'), '25000000');
 assert.equal(calculateLamports(1, '3'), '3333333');
