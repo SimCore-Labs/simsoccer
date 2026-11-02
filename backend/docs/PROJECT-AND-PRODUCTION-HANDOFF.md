@@ -109,6 +109,32 @@ At cutover the hostname briefly resolved to the former address `13.61.146.106`.
 After DNS reached the Elastic IP, Certbot issued the certificate and Nginx
 enabled the HTTPS redirect. The frontend was not redeployed or changed.
 
+## Synchronized kickoff correction — 2026-11-02
+
+The production setting staggered 30 fixtures by 60 seconds each, spreading a
+world round across 29 minutes. Since matches last 90 real minutes and the
+configured round break is 10 minutes, this also pushed later round schedules
+out by another 29 minutes per round. The stagger setting was removed; all
+fixtures in each shared round now receive the same kickoff across the active
+leagues. The 10-minute break remains intentional, so normal round starts are
+100 minutes apart.
+
+After building the scheduler on EC2, only `simsoccer-runtime` was restarted.
+The coordinator synchronized scheduled fixtures without changing fixtures
+that had already started or finished. At 2026-11-02 07:10 UTC, database
+verification showed 30 scheduled fixtures at one kickoff for each of Rounds
+36–38, with 100 minutes between rounds. Round 36 remained 08:24 UTC because
+Round 35 matches had already started at different times; the next round must
+wait until the latest match finishes plus the 10-minute break. Rounds 37 and
+38 moved to 10:04 and 11:44 UTC. World, Accounts, and Settlement readiness
+checks passed.
+
+The rollout used an isolated build from the deployed `378b5e6` baseline
+because the EC2 checkout contained unrelated uncommitted work. Only the
+scheduler modules were copied into the live build, and the unrelated checkout
+changes were left untouched. The production Git HEAD remains `378b5e6`; this
+scheduler change is not yet a committed Git release.
+
 ## At a glance
 
 SimSoccer runs a persistent, play-money football world. The backend owns the

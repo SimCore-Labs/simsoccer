@@ -24,7 +24,7 @@ Start runtime
 
 The frontend is a client of this world, not its clock or controller. A disconnected browser must not pause, restart, or alter a match. The database continues to represent the world while the API, worker, or frontend is offline.
 
-Each world round is shared across the configured competitions. Round 1 includes every Round 1 fixture in the Premier League, La Liga, and Serie A. Kickoffs may be staggered, but one match finishing must not prevent the other fixtures from starting. The world advances to Round 2 only after every Round 1 fixture across all three competitions and its required post-match processing have completed. Then the configured ten-minute world break begins.
+Each world round is shared across the configured competitions. Round 1 includes every Round 1 fixture in the Premier League, La Liga, and Serie A, and all fixtures in that round share one kickoff time. One match finishing must not prevent the other fixtures from starting. The world advances to Round 2 only after every Round 1 fixture across all three competitions and its required post-match processing have completed. Then the configured ten-minute world break begins.
 
 ## 2. Decisions That Resolve the Existing Specifications
 
@@ -85,13 +85,13 @@ Persist the actual kickoff, last processed virtual second, last event sequence, 
 World-round scheduling is durable data, not a timer in RAM. One world round includes fixtures from all configured leagues:
 
 1. Generate the round's fixtures internally for the Premier League, La Liga, and Serie A; do not fetch real-world fixture lists or scores.
-2. Assign and persist staggered kickoff times for every fixture across the three leagues. Ensure the schedule gives the configured market preparation buffer before each kickoff.
+2. Assign and persist one shared kickoff time for every fixture in a world round across the three leagues. Space round kickoffs by the match duration plus the configured world break, and ensure the first schedule gives the configured market preparation buffer.
 3. Make upcoming fixtures and markets discoverable before kickoff so users can place bets; close each fixture's markets at its persisted kickoff.
 4. Start each match at its scheduled time, independently of other matches and browser connections. Matches in one league must not block matches in another.
 5. Mark the world round complete only after every fixture across all configured leagues has finished and required result, table, rating, and settlement work has committed.
-6. Start one ten-minute world break after the final fixture in that shared round completes, then begin the next world round. Store this interval and the planned next-round time durably; do not maintain it only in worker memory.
+6. Start one ten-minute world break after the final fixture in that shared round completes, then start every fixture in the next world round together. Store the schedule durably; do not maintain it only in worker memory.
 
-If fixtures within a round are staggered, the next-round delay begins after the last fixture across all leagues completes. Each competition maintains its own table, but all competitions share the round number and round transition.
+Each competition maintains its own table, but all competitions share the round number, kickoff time, and round transition.
 
 ## 5. Startup and Reconciliation Contract
 
@@ -168,7 +168,7 @@ An API process being alive is not proof that the world coordinator is running. T
 | `npm start` | Builds, checks PostgreSQL/Redis, starts API, coordinator, and worker | Remains the single supervised world command |
 | Database/Redis | Connection checks exist; health routes exist | Continuous health, readiness, heartbeat, and degraded recovery |
 | Season identity | Seed supports year-labelled names; next-season code derives calendar years | Use `Season 1`, `Season 2`, ... independent of real-world years |
-| Fixtures | Seed and coordinator generate virtual fixtures; coordinator loops through active competitions | Schedule every fixture in the shared world round across all configured leagues, with staggered kickoffs |
+| Fixtures | Seed and coordinator generate virtual fixtures; coordinator loops through active competitions | Give every fixture in a shared world round the same kickoff across all configured leagues |
 | Simulation | Worker persists events/checkpoints and uses UTC progression; concurrency is configurable | Normal 90 virtual minutes take 90 real minutes; concurrent matches keep pace without blocking each other |
 | Recovery | Snapshot restoration and event uniqueness exist, but complete restart recovery is not proven | Restart reconciles each live fixture to UTC and resumes without duplicate events/results |
 | Round progression | Coordinator advances leagues independently | Advance all three competitions together after the entire world round and required processing complete |
@@ -183,7 +183,7 @@ The latest code includes snapshot saving/restoration and batched wall-clock prog
 Build and verify the world in these increments:
 
 1. **Season identity:** use persisted virtual sequence labels (`Season 1`, `Season 2`, ...). Do not infer season identity from calendar years.
-2. **Shared round model:** persist one world round covering every configured league, with independently staggered fixture kickoffs and a global round-completion barrier.
+2. **Shared round model:** persist one world round covering every configured league, with synchronized fixture kickoffs and a global round-completion barrier.
 3. **Real-time match clock:** set the normal match duration to 5,400 real seconds for 5,400 virtual seconds; retain shortened timing only for explicit isolated tests.
 4. **Checkpointed simulation:** save complete match/RNG state and event sequence; process multiple fixtures concurrently within configured database capacity; test actual restart/catch-up.
 5. **Independent settlement:** commit match results, then publish/queue settlement work for a separate consumer that settles only the relevant fixture's pending selections.
@@ -197,7 +197,7 @@ Each phase should be deployable and observable before adding the next. Do not la
 The autonomous world is ready only when these tests pass against an isolated development environment:
 
 - One command starts exactly one API, coordinator, and required workers after dependency checks; logs show which services became ready.
-- A virtual `Season 1` runs all fixtures for Round 1 across all three competitions, with staggered real-time kickoffs and no external fixture/result feed.
+- A virtual `Season 1` runs all fixtures for Round 1 across all three competitions, with synchronized real-time kickoffs and no external fixture/result feed.
 - Upcoming shared-round fixtures and markets are persisted and visible before their kickoffs without manual enqueue commands.
 - Every match's 90 virtual minutes take 90 real minutes in normal runtime; test acceleration is explicit and isolated.
 - Round 2 begins only after every Round 1 fixture across all three competitions and its required result/table/settlement work completes, followed by the configured ten-minute break.

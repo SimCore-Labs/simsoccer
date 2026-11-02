@@ -3,6 +3,7 @@ import { db, client } from '../db/index';
 import { leagues, seasons, teams, teamRatings, players, fixtures, standings, users, wallets } from '../db/schema/index';
 import { COMPETITIONS_DATA_BY_SEASON, SeedCompetition } from './data/competitions';
 import { generateDoubleRoundRobin } from './fixture-generator';
+import { buildSynchronizedRoundKickoffs } from './round-schedule';
 import { eq, and } from 'drizzle-orm';
 import { env } from '../config/env';
 
@@ -52,14 +53,6 @@ export async function seedDatabase(targetSeasonName: string = 'Season 1') {
   const seasonNumber = Number(seasonMatch[1]);
   const seasonCompetitions = resolveCompetitionDataset(targetSeasonName);
   const firstKickoffBase = new Date(Date.now() + env.MARKET_PREPARATION_BUFFER_SECONDS * 1000);
-  const worldFixturesPerRound = Object.values(seasonCompetitions)
-    .reduce((total, competition) => total + competition.teams.length / 2, 0);
-  const worldRoundIntervalMs = (
-    env.MATCH_REAL_DURATION_SECONDS
-    + env.ROUND_BREAK_SECONDS
-    + (worldFixturesPerRound - 1) * env.FIXTURE_KICKOFF_STAGGER_SECONDS
-  ) * 1000;
-  const kickoffIndexByRound = new Map<number, number>();
 
   console.log(`🌱 Starting database seed for season '${targetSeasonName}'...`);
 
@@ -187,19 +180,19 @@ export async function seedDatabase(targetSeasonName: string = 'Season 1') {
     if (existingFixtures.length === 0) {
       console.log(`  📅 Generating 380 fixtures for ${compData.leagueName}...`);
       const pairings = generateDoubleRoundRobin(createdTeamIds.length);
+      const roundKickoffs = buildSynchronizedRoundKickoffs(
+        firstKickoffBase,
+        Math.max(...pairings.map((pairing) => pairing.round)),
+        env.MATCH_REAL_DURATION_SECONDS,
+        env.ROUND_BREAK_SECONDS,
+      );
       const fixturesToInsert = pairings.map((pairing) => {
-        const kickoffIndex = kickoffIndexByRound.get(pairing.round) ?? 0;
-        kickoffIndexByRound.set(pairing.round, kickoffIndex + 1);
         return {
           seasonId: seasonRecord.id,
           round: pairing.round,
           homeTeamId: createdTeamIds[pairing.homeTeamIndex] as string,
           awayTeamId: createdTeamIds[pairing.awayTeamIndex] as string,
-          scheduledAt: new Date(
-            firstKickoffBase.getTime()
-            + (pairing.round - 1) * worldRoundIntervalMs
-            + kickoffIndex * env.FIXTURE_KICKOFF_STAGGER_SECONDS * 1000
-          ),
+          scheduledAt: roundKickoffs[pairing.round - 1],
           status: 'SCHEDULED',
         };
       });

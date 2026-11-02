@@ -45,7 +45,7 @@ The application can be organized as a modular monolith initially, but betting mu
 
 ## 4. Shared-Round Clock and Market Availability
 
-The world has one round number shared across the active leagues. Each league has its own season and fixture rows, and fixture kickoffs are staggered. For betting, all fixtures with the active shared round number form one round offering.
+The world has one round number shared across the active leagues. Each league has its own season and fixture rows, and all fixtures in a world round share one kickoff time. For betting, all fixtures with the active shared round number form one round offering.
 
 Let $K$ be the earliest scheduled kickoff across all eligible fixtures in the active shared round. Let $C$ be the cutoff:
 
@@ -296,7 +296,7 @@ The existing `/ws` is for match events. Either add a typed market subscription t
 
 - Match simulation output is unchanged by any betting operation.
 - Upcoming markets exist before cutoff without requiring a `GET` side effect.
-- The shared round suspends at its earliest kickoff minus 60 seconds, including later staggered fixtures.
+- The shared round suspends 60 seconds before its shared kickoff.
 - The API refuses to treat any client clock or stale browser as evidence that a market is open.
 - Multiple selections across the three leagues are allowed only when they share the active round; duplicate fixture selections are rejected in this phase.
 - Straight-multiple prices use decimal multiplication and exact rounding; total return includes stake and profit is separately shown.

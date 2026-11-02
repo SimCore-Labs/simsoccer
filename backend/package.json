@@ -18,7 +18,8 @@
     "migrate": "npm run db:migrate",
     "simulate:fixture": "tsx src/workers/enqueue-simulation.ts",
     "test": "tsx src/tests/comprehensive-test.ts",
-    "test:ticket-access": "tsx src/tests/ticket-access.test.ts"
+    "test:ticket-access": "tsx src/tests/ticket-access.test.ts",
+    "test:round-schedule": "tsx src/tests/round-schedule.test.ts"
   },
   "keywords": [],
   "author": "",

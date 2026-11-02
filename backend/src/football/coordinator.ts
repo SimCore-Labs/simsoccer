@@ -14,6 +14,7 @@ import {
 } from '../markets/probability-engine';
 import { getRoundCutoffAt } from '../betting/round-market-policy';
 import { generateDoubleRoundRobin } from './fixture-generator';
+import { buildSynchronizedRoundKickoffs } from './round-schedule';
 
 const ADVISORY_LOCK_ID = 88812388;
 const NODE_ID = `node-${process.pid}-${Math.random().toString(36).substring(2, 7)}`;
@@ -132,6 +133,7 @@ let loopInterval: NodeJS.Timeout | null = null;
 let currentStatus: WorldStatusType = 'WAITING_FOR_SEASON';
 let degradedReasonStr: string | null = null;
 let lastReconciliationTime: Date | null = null;
+let hasSynchronizedExistingSchedule = false;
 
 export async function checkDependenciesHealth(): Promise<{ postgres: boolean; redis: boolean; migrationOk: boolean; error?: string }> {
   let pgOk = false;
@@ -265,17 +267,9 @@ async function createNextWorldSeasons(previousWorldSeasons: Array<{ league: any;
   const nextSeasonNumber = Math.max(...previousWorldSeasons.map(({ season }) => season.seasonNumber)) + 1;
   const now = new Date();
   const firstKickoff = new Date(now.getTime() + env.MARKET_PREPARATION_BUFFER_SECONDS * 1000);
-  const worldFixturesPerRound = previousWorldSeasons
-    .reduce((total, { league }) => total + league.teamCount / 2, 0);
-  const worldRoundIntervalMs = (
-    env.MATCH_REAL_DURATION_SECONDS
-    + env.ROUND_BREAK_SECONDS
-    + (worldFixturesPerRound - 1) * env.FIXTURE_KICKOFF_STAGGER_SECONDS
-  ) * 1000;
 
   return db.transaction(async (tx) => {
     const createdSeasons = [];
-    const kickoffIndexByRound = new Map<number, number>();
 
     for (const { league, season: previousSeason } of previousWorldSeasons) {
       const leagueTeams = await tx.select().from(teams)
@@ -320,19 +314,19 @@ async function createNextWorldSeasons(previousWorldSeasons: Array<{ league: any;
       }
 
       const pairings = generateDoubleRoundRobin(leagueTeams.length);
+      const roundKickoffs = buildSynchronizedRoundKickoffs(
+        firstKickoff,
+        totalRounds,
+        env.MATCH_REAL_DURATION_SECONDS,
+        env.ROUND_BREAK_SECONDS,
+      );
       const fixturesToInsert = pairings.map((pairing) => {
-        const kickoffIndex = kickoffIndexByRound.get(pairing.round) ?? 0;
-        kickoffIndexByRound.set(pairing.round, kickoffIndex + 1);
         return {
           seasonId: newSeason.id,
           round: pairing.round,
           homeTeamId: leagueTeams[pairing.homeTeamIndex].id,
           awayTeamId: leagueTeams[pairing.awayTeamIndex].id,
-          scheduledAt: new Date(
-            firstKickoff.getTime()
-            + (pairing.round - 1) * worldRoundIntervalMs
-            + kickoffIndex * env.FIXTURE_KICKOFF_STAGGER_SECONDS * 1000
-          ),
+          scheduledAt: roundKickoffs[pairing.round - 1],
           status: 'SCHEDULED',
         };
       });
@@ -382,6 +376,86 @@ export async function tickCoordinator(): Promise<void> {
     degradedReasonStr = err.message;
     await updateRuntimeHeartbeat('DEGRADED', null, 0, 38, degradedReasonStr);
   }
+}
+
+async function synchronizeExistingWorldSchedule(
+  worldFixtures: Array<typeof fixtures.$inferSelect>,
+  currentRound: number,
+  totalRounds: number,
+  now: Date,
+): Promise<number> {
+  const roundFixtures = worldFixtures.filter((fixture) => fixture.round === currentRound);
+  if (roundFixtures.length === 0) return 0;
+
+  const startedFixtures = roundFixtures.filter((fixture) => fixture.startedAt !== null);
+  const scheduledFixtures = roundFixtures.filter((fixture) => fixture.status === 'SCHEDULED');
+  const firstScheduledKickoff = scheduledFixtures.reduce(
+    (earliest: Date | null, fixture) => !earliest || fixture.scheduledAt < earliest ? fixture.scheduledAt : earliest,
+    null,
+  );
+  const currentRoundKickoff = startedFixtures.length > 0
+    ? now
+    : firstScheduledKickoff;
+
+  let changedRounds = 0;
+  if (currentRoundKickoff && scheduledFixtures.some(
+    (fixture) => fixture.scheduledAt.getTime() !== currentRoundKickoff.getTime(),
+  )) {
+    await db.update(fixtures)
+      .set({ scheduledAt: currentRoundKickoff, updatedAt: now })
+      .where(inArray(fixtures.id, scheduledFixtures.map((fixture) => fixture.id)));
+    for (const fixture of scheduledFixtures) fixture.scheduledAt = currentRoundKickoff;
+    changedRounds++;
+  }
+
+  let latestProjectedFinish: Date | null = null;
+  const matchDurationMs = env.MATCH_REAL_DURATION_SECONDS * 1000;
+  for (const fixture of roundFixtures) {
+    if (fixture.status === 'CANCELLED') continue;
+
+    let projectedFinish: Date | null = null;
+    if (fixture.status === 'FINISHED' && fixture.finishedAt) {
+      projectedFinish = fixture.finishedAt;
+    } else if (fixture.startedAt) {
+      projectedFinish = new Date(Math.max(now.getTime(), fixture.startedAt.getTime() + matchDurationMs));
+    } else if (fixture.status === 'SCHEDULED') {
+      projectedFinish = new Date(fixture.scheduledAt.getTime() + matchDurationMs);
+    }
+
+    if (projectedFinish && (!latestProjectedFinish || projectedFinish > latestProjectedFinish)) {
+      latestProjectedFinish = projectedFinish;
+    }
+  }
+
+  if (!latestProjectedFinish || currentRound >= totalRounds) return changedRounds;
+
+  const firstUpcomingKickoff = new Date(Math.max(
+    now.getTime(),
+    latestProjectedFinish.getTime() + env.ROUND_BREAK_SECONDS * 1000,
+  ));
+  const upcomingRoundKickoffs = buildSynchronizedRoundKickoffs(
+    firstUpcomingKickoff,
+    totalRounds - currentRound,
+    env.MATCH_REAL_DURATION_SECONDS,
+    env.ROUND_BREAK_SECONDS,
+  );
+
+  for (let round = currentRound + 1; round <= totalRounds; round++) {
+    const kickoff = upcomingRoundKickoffs[round - currentRound - 1];
+    const scheduledRoundFixtures = worldFixtures.filter(
+      (fixture) => fixture.round === round && fixture.status === 'SCHEDULED',
+    );
+    if (scheduledRoundFixtures.length === 0 || !kickoff) continue;
+    if (!scheduledRoundFixtures.some((fixture) => fixture.scheduledAt.getTime() !== kickoff.getTime())) continue;
+
+    await db.update(fixtures)
+      .set({ scheduledAt: kickoff, updatedAt: now })
+      .where(inArray(fixtures.id, scheduledRoundFixtures.map((fixture) => fixture.id)));
+    for (const fixture of scheduledRoundFixtures) fixture.scheduledAt = kickoff;
+    changedRounds++;
+  }
+
+  return changedRounds;
 }
 
 export async function reconcileAndScheduleWorld(): Promise<void> {
@@ -456,6 +530,14 @@ export async function reconcileAndScheduleWorld(): Promise<void> {
   const fixtureDerivedRound = deriveWorldRound(allFixtures, totalRounds);
   let worldRound = deriveWorldRoundAfterBreak(allFixtures, totalRounds, now, env.ROUND_BREAK_SECONDS);
 
+  if (!hasSynchronizedExistingSchedule) {
+    const changedRounds = await synchronizeExistingWorldSchedule(allFixtures, worldRound, totalRounds, now);
+    hasSynchronizedExistingSchedule = true;
+    if (changedRounds > 0) {
+      console.log(`⚽ [WORLD COORDINATOR] Synchronized scheduled fixtures across ${changedRounds} world rounds.`);
+    }
+  }
+
   if (worldRound === fixtureDerivedRound && worldRound > 1) {
     const previousRoundFixtures = allFixtures.filter((fixture) => fixture.round === worldRound - 1);
     const previousRoundIsComplete = previousRoundFixtures.length > 0
@@ -470,9 +552,8 @@ export async function reconcileAndScheduleWorld(): Promise<void> {
       const nextRoundFixtures = allFixtures.filter((fixture) => fixture.round === worldRound);
       let staleKickoffsCorrected = 0;
 
-      for (let fixtureIndex = 0; fixtureIndex < nextRoundFixtures.length; fixtureIndex++) {
-        const fixture = nextRoundFixtures[fixtureIndex];
-        const expectedKickoff = new Date(nextRoundAt.getTime() + fixtureIndex * env.FIXTURE_KICKOFF_STAGGER_SECONDS * 1000);
+      for (const fixture of nextRoundFixtures) {
+        const expectedKickoff = nextRoundAt;
         if (fixture.status === 'SCHEDULED' && fixture.scheduledAt > expectedKickoff) {
           await db.update(fixtures).set({ scheduledAt: expectedKickoff, updatedAt: now }).where(eq(fixtures.id, fixture.id));
           fixture.scheduledAt = expectedKickoff;
@@ -526,9 +607,8 @@ export async function reconcileAndScheduleWorld(): Promise<void> {
       if (worldRound < totalRounds) {
         const nextRound = worldRound + 1;
         const nextFixtures = allFixtures.filter((fixture) => fixture.round === nextRound && fixture.status === 'SCHEDULED');
-        let fixtureIndex = 0;
         for (const fixture of nextFixtures) {
-          const scheduledAt = new Date(nextRoundAt.getTime() + fixtureIndex++ * env.FIXTURE_KICKOFF_STAGGER_SECONDS * 1000);
+          const scheduledAt = nextRoundAt;
           await db.update(fixtures).set({ scheduledAt, updatedAt: now }).where(eq(fixtures.id, fixture.id));
           fixture.scheduledAt = scheduledAt;
         }
